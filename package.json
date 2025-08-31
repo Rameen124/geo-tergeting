@@ -1,27 +1,30 @@
 {
   "name": "undetectable-traffic-converter",
   "version": "1.0.0",
-  "description": "",
+  "description": "Proxy server for routing traffic through residential proxies",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0",
-    "geoip-lite": "^1.4.10",
+    "express": "^4.18.2",
+    "socks-proxy-agent": "^8.0.2",
     "node-fetch": "^2.7.0",
-    "proxy-chain": "^2.5.9",
-    "puppeteer": "^24.17.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-anonymize-ua": "^2.4.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "socks-proxy-agent": "^8.0.5",
-    "user-agents": "^1.1.645",
-    "uuid": "^11.1.0"
+    "uuid": "^9.0.1",
+    "user-agents": "^1.0.1323",
+    "dotenv": "^16.3.1"
+  },
+  "keywords": [
+    "proxy",
+    "traffic",
+    "analytics",
+    "privacy"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
