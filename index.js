@@ -6,7 +6,9 @@ const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 
 const app = express();
+// Use any available port, starting from 3000
 const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0'; // Listen on all network interfaces
 const TARGET_SITE = "https://havali.xyz";
 
 // Load proxies from proxies.txt
@@ -177,7 +179,22 @@ app.get("/", async (req, res) => {
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-});
+// Function to start server with port retry logic
+function startServer(port, host) {
+  const server = app.listen(port, host, () => {
+    console.log(`🚀 Server running at http://${host}:${port}`);
+    console.log(`🌍 Server is globally accessible at http://13.61.6.207:${port}`);
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`⚠️ Port ${port} is busy, trying port ${port + 1}...`);
+      startServer(port + 1, host);
+    } else {
+      console.error('❌ Server error:', err);
+    }
+  });
+  
+  return server;
+}
+
+// Start server with retry logic
+startServer(PORT, HOST);
