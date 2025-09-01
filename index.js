@@ -1,26 +1,54 @@
 const express = require("express");
 const { SocksProxyAgent } = require("socks-proxy-agent");
-const fetch = require("node-fetch");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
+const winston = require("winston");
 require("dotenv").config();
 
+// Configure logging
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.File({ filename: "error.log", level: "error" }),
+    new winston.transports.File({ filename: "combined.log" }),
+    new winston.transports.Console({
+      format: winston.format.simple()
+    })
+  ]
+});
+
 const app = express();
-// Use any available port, starting from 3000
-const PORT = parseInt(process.env.PORT) || 3000; // Ensure PORT is a number
-const HOST = '0.0.0.0'; // Listen on all network interfaces
-const TARGET_SITE = "https://havali.xyz";
+const PORT = parseInt(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
+const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
 
 // Load proxies from proxies.txt
 let proxies = [];
 try {
-  proxies = fs
-    .readFileSync("proxies.txt", "utf-8")
-    .split("\n")
-    .filter((line) => line.trim() !== "");
-  console.log(`✅ Loaded ${proxies.length} proxies`);
+  if (fs.existsSync("proxies.txt")) {
+    proxies = fs
+      .readFileSync("proxies.txt", "utf-8")
+      .split("\n")
+      .map(line => line.trim())
+      .filter(line => line !== "")
+      .map(line => {
+        // Ensure proper proxy format
+        if (!line.startsWith("socks5://") && !line.startsWith("socks4://") && !line.startsWith("http://")) {
+          return `socks5://${line}`;
+        }
+        return line;
+      });
+    
+    logger.info(`Loaded ${proxies.length} proxies from proxies.txt`);
+  } else {
+    logger.warn("proxies.txt not found. Running without proxies.");
+  }
 } catch (err) {
-  console.error("⚠️ Error loading proxies.txt:", err.message);
+  logger.error("Error loading proxies:", err.message);
 }
 
 // Utility → get client IP
@@ -86,8 +114,7 @@ function getSpoofedHeaders(ip, userAgent, country, timezone) {
     "X-Geo-Country": country,
     "X-Timezone": timezone,
     Referer: "https://www.google.com/",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
   };
 }
@@ -95,106 +122,179 @@ function getSpoofedHeaders(ip, userAgent, country, timezone) {
 // Test proxy
 async function testProxy(proxyUrl) {
   try {
+    // Use dynamic import for node-fetch
+    const fetch = (await import('node-fetch')).default;
     const agent = new SocksProxyAgent(proxyUrl);
+    
     const res = await fetch("https://api.ipify.org?format=json", {
       agent,
       timeout: 8000,
     });
+    
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    
     const data = await res.json();
     return { working: true, ip: data.ip };
   } catch (err) {
-    return { working: false };
+    logger.error(`Proxy ${proxyUrl} failed: ${err.message}`);
+    return { working: false, error: err.message };
   }
 }
 
-// Pick working proxy
-async function getTestedProxy() {
+// Pick working proxy with fallback
+async function getWorkingProxy() {
+  // If no proxies available, return null for direct connection
+  if (proxies.length === 0) {
+    return null;
+  }
+  
+  // Test all proxies to find a working one
   for (let proxy of proxies) {
+    logger.info(`Testing proxy: ${proxy}`);
     const test = await testProxy(proxy);
     if (test.working) {
-      return proxy;
+      logger.info(`Proxy working: ${proxy} (IP: ${test.ip})`);
+      return { url: proxy, ip: test.ip };
     }
   }
-  throw new Error("No working proxy found");
+  
+  logger.warn("No working proxy found, using direct connection");
+  return null;
 }
 
-// Root endpoint → serve havali.xyz via proxy
+// GA Spoofing Script
+const GA_SPOOF_SCRIPT = `
+<script>
+  // Google Analytics Spoofing
+  (function() {
+    // Override navigator.sendBeacon
+    const originalSendBeacon = navigator.sendBeacon;
+    navigator.sendBeacon = function(url, data) {
+      if (url.includes('google-analytics.com')) {
+        console.log('GA beacon intercepted:', url);
+        // Add custom headers or modify data here
+        const modifiedData = new Blob([data], { type: 'application/x-www-form-urlencoded' });
+        return originalSendBeacon.call(this, url, modifiedData);
+      }
+      return originalSendBeacon.apply(this, arguments);
+    };
+    
+    // Override XMLHttpRequest for GA
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      if (url && url.includes('google-analytics.com')) {
+        console.log('GA XHR intercepted:', url);
+        // Add custom headers when request is sent
+        const originalSend = this.send;
+        this.send = function(data) {
+          this.setRequestHeader('X-Forwarded-For', '${session.proxyIp || clientIp}');
+          this.setRequestHeader('X-Geo-Country', '${session.country}');
+          return originalSend.apply(this, arguments);
+        };
+      }
+      return originalXHROpen.apply(this, arguments);
+    };
+  })();
+</script>
+`;
+
+// Root endpoint → serve target site via proxy
 app.get("/", async (req, res) => {
   const clientIp = getClientIp(req);
-  console.log(`👤 Visitor from IP: ${clientIp}`);
+  logger.info(`Request from ${clientIp} for ${req.url}`);
 
   const session = createSession();
+  
   try {
-    const proxyUrl = await getTestedProxy();
-    console.log(`🌀 Using Proxy: ${proxyUrl}`);
+    const proxy = await getWorkingProxy();
+    let agent = null;
+    let proxyIp = "direct";
 
-    const proxyTest = await testProxy(proxyUrl);
-    if (!proxyTest.working) {
-      return res
-        .status(500)
-        .send("<h2>No working proxy available right now.</h2>");
+    if (proxy) {
+      logger.info(`Using proxy: ${proxy.url}`);
+      session.proxyIp = proxy.ip;
+      proxyIp = proxy.ip;
+      agent = new SocksProxyAgent(proxy.url);
     }
 
-    session.proxyIp = proxyTest.ip;
-    const agent = new SocksProxyAgent(proxyUrl);
-
+    // Use dynamic import for node-fetch
+    const fetch = (await import('node-fetch')).default;
+    
     const spoofedHeaders = getSpoofedHeaders(
-      proxyTest.ip,
+      proxyIp,
       session.userAgent,
       session.country,
       session.timezone
     );
 
-    const response = await fetch(TARGET_SITE, {
-      agent,
+    const fetchOptions = {
       timeout: 30000,
       headers: spoofedHeaders,
-    });
+    };
+
+    if (agent) {
+      fetchOptions.agent = agent;
+    }
+
+    const response = await fetch(TARGET_SITE, fetchOptions);
 
     let body = await response.text();
 
-    // inject debug info
+    // Inject debug info and GA spoofing script
     if (response.headers.get("content-type")?.includes("text/html")) {
       const sessionScript = `
         <script>
-          console.log("🔗 Served via proxy: ${session.proxyIp}");
-          console.log("🕵️ User-Agent: ${session.userAgent}");
+          console.log("Served via: ${proxyIp}");
+          console.log("User-Agent: ${session.userAgent}");
+          console.log("Country: ${session.country}");
+          console.log("Timezone: ${session.timezone}");
         </script>
       `;
-      body = body.replace("</body>", sessionScript + "</body>");
+      
+      // Inject scripts before closing body tag
+      body = body.replace("</body>", sessionScript + GA_SPOOF_SCRIPT + "</body>");
     }
 
-    res.set(
-      "Content-Type",
-      response.headers.get("content-type") || "text/html"
-    );
-
-    console.log(
-      `✅ Served havali.xyz to ${clientIp} via proxy ${session.proxyIp}`
-    );
+    res.set("Content-Type", response.headers.get("content-type") || "text/html");
+    logger.info(`Served ${TARGET_SITE} to ${clientIp} via ${proxyIp}`);
     res.send(body);
   } catch (err) {
-    console.error("❌ Proxy fetch error:", err.message);
-    res.status(500).send("<h2>Error fetching site through proxy.</h2>");
+    logger.error(`Fetch error: ${err.message}`);
+    res.status(500).send(`
+      <h2>Error fetching site</h2>
+      <p>${err.message}</p>
+    `);
   }
+});
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "OK",
+    proxies: proxies.length,
+    target: TARGET_SITE,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Function to start server with port retry logic
 function startServer(port, host, maxAttempts = 10) {
-  // Ensure port is a number
   const portNumber = parseInt(port);
   
   const server = app.listen(portNumber, host, () => {
-    console.log(`🚀 Server running at http://${host}:${portNumber}`);
-    console.log(`🌍 Server is globally accessible at http://13.61.6.207:${portNumber}`);
+    logger.info(`Server running at http://${host}:${portNumber}`);
+    logger.info(`Server is globally accessible at http://13.61.6.207:${portNumber}`);
+    logger.info(`Proxying to: ${TARGET_SITE}`);
   }).on('error', (err) => {
     if (err.code === 'EADDRINUSE' && maxAttempts > 0) {
-      console.log(`⚠️ Port ${portNumber} is busy, trying port ${portNumber + 1}...`);
+      logger.info(`Port ${portNumber} is busy, trying port ${portNumber + 1}...`);
       startServer(portNumber + 1, host, maxAttempts - 1);
     } else {
-      console.error('❌ Server error:', err);
+      logger.error(`Server error: ${err.message}`);
       if (maxAttempts <= 0) {
-        console.error('❌ Maximum port retry attempts reached. Could not start server.');
+        logger.error('Maximum port retry attempts reached. Could not start server.');
       }
     }
   });
