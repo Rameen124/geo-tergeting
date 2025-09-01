@@ -2,24 +2,24 @@ const express = require("express");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
-const winston = require("winston");
 require("dotenv").config();
 
-// ----------------- Logger -----------------
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.printf(
-      (info) => `${info.timestamp} [${info.level.toUpperCase()}]: ${info.message}`
-    )
-  ),
-  transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: "combined.log" }),
-    new winston.transports.File({ filename: "error.log", level: "error" }),
-  ],
-});
+// ----------------- Simple Logger -----------------
+function getTimestamp() {
+  return new Date().toISOString();
+}
+
+function logInfo(message) {
+  console.log(`${getTimestamp()} [INFO]: ${message}`);
+}
+
+function logWarn(message) {
+  console.warn(`${getTimestamp()} [WARN]: ${message}`);
+}
+
+function logError(message) {
+  console.error(`${getTimestamp()} [ERROR]: ${message}`);
+}
 
 // ----------------- App Config -----------------
 const app = express();
@@ -43,12 +43,12 @@ try {
           ? line
           : `socks5://${line}`
       );
-    logger.info(`Loaded ${proxies.length} proxies from proxies.txt`);
+    logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
   } else {
-    logger.warn("⚠️ proxies.txt not found. Running without proxies.");
+    logWarn("proxies.txt not found. Running without proxies.");
   }
 } catch (err) {
-  logger.error(`Failed to load proxies: ${err.message}`);
+  logError(`Failed to load proxies: ${err.message}`);
 }
 
 // ----------------- Helpers -----------------
@@ -119,21 +119,21 @@ async function testProxy(proxyUrl) {
     const data = await res.json();
     return { working: true, ip: data.ip };
   } catch (err) {
-    logger.warn(`Proxy ${proxyUrl} failed: ${err.message}`);
+    logWarn(`Proxy ${proxyUrl} failed: ${err.message}`);
     return { working: false };
   }
 }
 
 async function getWorkingProxy() {
   for (let proxy of proxies) {
-    logger.info(`Testing proxy: ${proxy}`);
+    logInfo(`Testing proxy: ${proxy}`);
     const test = await testProxy(proxy);
     if (test.working) {
-      logger.info(`✅ Proxy working: ${proxy} (IP: ${test.ip})`);
+      logInfo(`Proxy working: ${proxy} (IP: ${test.ip})`);
       return { url: proxy, ip: test.ip };
     }
   }
-  logger.warn("⚠️ No working proxy found. Using direct connection.");
+  logWarn("No working proxy found. Using direct connection.");
   return null;
 }
 
@@ -171,7 +171,7 @@ function getGASpoofScript(session, clientIp) {
 app.get("/", async (req, res) => {
   const clientIp = getClientIp(req);
   const session = createSession();
-  logger.info(`🌍 Request from ${clientIp}`);
+  logInfo(`Request from ${clientIp}`);
 
   try {
     const proxy = await getWorkingProxy();
@@ -210,9 +210,9 @@ app.get("/", async (req, res) => {
     res.set("Content-Type", response.headers.get("content-type") || "text/html");
     res.send(body);
 
-    logger.info(`✅ Served ${TARGET_SITE} to ${clientIp} via ${proxyIp}`);
+    logInfo(`Served ${TARGET_SITE} to ${clientIp} via ${proxyIp}`);
   } catch (err) {
-    logger.error(`❌ Fetch error: ${err.message}`);
+    logError(`Fetch error: ${err.message}`);
     res.status(500).send(`<h2>Error fetching site</h2><p>${err.message}</p>`);
   }
 });
@@ -230,15 +230,15 @@ app.get("/health", (req, res) => {
 function startServer(port, host, retries = 10) {
   const server = app
     .listen(port, host, () => {
-      logger.info(`🚀 Server running: http://${host}:${port}`);
-      logger.info(`Proxying to: ${TARGET_SITE}`);
+      logInfo(`Server running: http://${host}:${port}`);
+      logInfo(`Proxying to: ${TARGET_SITE}`);
     })
     .on("error", (err) => {
       if (err.code === "EADDRINUSE" && retries > 0) {
-        logger.warn(`Port ${port} busy. Retrying on ${port + 1}...`);
+        logWarn(`Port ${port} busy. Retrying on ${port + 1}...`);
         startServer(port + 1, host, retries - 1);
       } else {
-        logger.error(`Server failed: ${err.message}`);
+        logError(`Server failed: ${err.message}`);
       }
     });
 
