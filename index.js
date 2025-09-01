@@ -4,7 +4,7 @@ const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 
-// ----------------- Simple Logger -----------------
+// ----------------- Simple Logging Functions -----------------
 function getTimestamp() {
   return new Date().toISOString();
 }
