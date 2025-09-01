@@ -1,14 +1,3 @@
-/**
- * Geo-Targeting Proxy App
- * Author: Rameen + GPT Rewrite
- * Features:
- * - Proxy rotation (SOCKS/HTTP supported)
- * - Session spoofing (User-Agent, Country, Timezone, Headers)
- * - Google Analytics interception
- * - Logging with Winston
- * - Health endpoint
- */
-
 const express = require("express");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 const fs = require("fs");
@@ -212,6 +201,8 @@ app.get("/", async (req, res) => {
         console.log("Country: ${session.country}");
         console.log("Timezone: ${session.timezone}");
       </script>`;
+      
+      // Fixed: Use the function to generate GA spoof script
       body = body.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
     }
 
