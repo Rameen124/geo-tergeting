@@ -16,9 +16,9 @@ const logger = winston.createLogger({
     new winston.transports.File({ filename: "error.log", level: "error" }),
     new winston.transports.File({ filename: "combined.log" }),
     new winston.transports.Console({
-      format: winston.format.simple()
-    })
-  ]
+      format: winston.format.simple(),
+    }),
+  ],
 });
 
 const app = express();
@@ -33,10 +33,14 @@ try {
     proxies = fs
       .readFileSync("proxies.txt", "utf-8")
       .split("\n")
-      .map(line => line.trim())
-      .filter(line => line !== "")
-      .map(line => {
-        if (!line.startsWith("socks5://") && !line.startsWith("socks4://") && !line.startsWith("http://")) {
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .map((line) => {
+        if (
+          !line.startsWith("socks5://") &&
+          !line.startsWith("socks4://") &&
+          !line.startsWith("http://")
+        ) {
           return `socks5://${line}`;
         }
         return line;
@@ -187,6 +191,7 @@ app.get("/", async (req, res) => {
   const clientIp = getClientIp(req);
   logger.info(`Request from ${clientIp} for ${req.url}`);
 
+  // ✅ Create new session here
   const session = createSession();
 
   try {
@@ -263,12 +268,16 @@ function startServer(port, host, maxAttempts = 10) {
     })
     .on("error", (err) => {
       if (err.code === "EADDRINUSE" && maxAttempts > 0) {
-        logger.info(`Port ${portNumber} is busy, trying port ${portNumber + 1}...`);
+        logger.info(
+          `Port ${portNumber} is busy, trying port ${portNumber + 1}...`
+        );
         startServer(portNumber + 1, host, maxAttempts - 1);
       } else {
         logger.error(`Server error: ${err.message}`);
         if (maxAttempts <= 0) {
-          logger.error("Maximum port retry attempts reached. Could not start server.");
+          logger.error(
+            "Maximum port retry attempts reached. Could not start server."
+          );
         }
       }
     });
