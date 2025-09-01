@@ -202,8 +202,9 @@ app.get("/", async (req, res) => {
         console.log("Timezone: ${session.timezone}");
       </script>`;
       
-      // Fixed: Use the function to generate GA spoof script
-      body = body.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
+      // Generate GA spoof script with current session and client IP
+      const gaSpoofScript = getGASpoofScript(session, clientIp);
+      body = body.replace("</body>", sessionScript + gaSpoofScript + "</body>");
     }
 
     res.set("Content-Type", response.headers.get("content-type") || "text/html");
