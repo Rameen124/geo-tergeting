@@ -2,6 +2,7 @@ const express = require("express");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
+const UserAgent = require("user-agents");
 require("dotenv").config();
 
 // ----------------- Simple Logging Functions -----------------
@@ -87,15 +88,11 @@ function randomPick(arr) {
 }
 
 function createSession() {
+  const userAgent = new UserAgent();
   return {
     id: uuidv4(),
     proxyIp: null,
-    userAgent: randomPick([
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
-      "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile Safari/604.1",
-    ]),
+    userAgent: userAgent.toString(),
     country: randomPick(["US", "IN", "PK", "UK", "DE", "FR", "CA", "AU"]),
     timezone: randomPick([
       "America/New_York",
@@ -262,7 +259,7 @@ app.get("/", async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) {
+app.get("/health", (req, res) => {
   res.json({
     status: "OK",
     proxies: proxies.length,
