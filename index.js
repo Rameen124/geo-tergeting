@@ -5,24 +5,15 @@ const { v4: uuidv4 } = require("uuid");
 const UserAgent = require("user-agents");
 require("dotenv").config();
 
-// ----------------- Simple Logging Functions -----------------
+// ----------------- Logging -----------------
 function getTimestamp() {
   return new Date().toISOString();
 }
+function logInfo(msg) { console.log(`${getTimestamp()} [INFO]: ${msg}`); }
+function logWarn(msg) { console.warn(`${getTimestamp()} [WARN]: ${msg}`); }
+function logError(msg) { console.error(`${getTimestamp()} [ERROR]: ${msg}`); }
 
-function logInfo(message) {
-  console.log(`${getTimestamp()} [INFO]: ${message}`);
-}
-
-function logWarn(message) {
-  console.warn(`${getTimestamp()} [WARN]: ${message}`);
-}
-
-function logError(message) {
-  console.error(`${getTimestamp()} [ERROR]: ${message}`);
-}
-
-// ----------------- App Config -----------------
+// ----------------- Config -----------------
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -32,44 +23,26 @@ const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
 let proxies = [];
 try {
   if (fs.existsSync("proxies.txt")) {
-    const proxyLines = fs.readFileSync("proxies.txt", "utf-8").split("\n");
-    
-    proxies = proxyLines
+    proxies = fs
+      .readFileSync("proxies.txt", "utf-8")
+      .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        // Fix double protocol issue (like socks5://socks5h://)
-        if (line.includes("://")) {
-          // Remove any duplicate protocol prefixes
-          const parts = line.split("://");
-          if (parts.length > 2) {
-            // If there are multiple protocols, keep only the last one
-            const fixedProxy = parts[parts.length - 2] + "://" + parts[parts.length - 1];
-            logWarn(`Fixed malformed proxy: ${line} -> ${fixedProxy}`);
-            return fixedProxy;
-          }
+        // Agar proxy already protocol ke sath hai (socks/http/https) → as is use karo
+        if (/^(socks5h?|socks4|https?):\/\//i.test(line)) {
           return line;
-        } else {
-          // Add default protocol if missing
-          return `socks5://${line}`;
         }
-      })
-      .filter(proxy => {
-        // Filter out any remaining malformed proxies
-        const protocolCount = (proxy.match(/:\/\//g) || []).length;
-        if (protocolCount > 1) {
-          logWarn(`Skipping malformed proxy: ${proxy}`);
-          return false;
-        }
-        return true;
+        // Warna default socks5h:// add karo
+        return `socks5h://${line}`;
       });
-    
+
     logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
   } else {
     logWarn("proxies.txt not found. Running without proxies.");
   }
 } catch (err) {
-  logError(`Failed to load proxies: ${err.message}`);
+  logError(`Proxy load failed: ${err.message}`);
 }
 
 // ----------------- Helpers -----------------
@@ -78,15 +51,12 @@ function getClientIp(req) {
     req.headers["x-forwarded-for"]?.split(",")[0] ||
     req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
-    req.connection?.socket?.remoteAddress ||
     "unknown"
   );
 }
-
 function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
-
 function createSession() {
   const userAgent = new UserAgent();
   return {
@@ -104,7 +74,6 @@ function createSession() {
     ]),
   };
 }
-
 function getSpoofedHeaders(ip, ua, country, timezone) {
   return {
     "User-Agent": ua,
@@ -123,48 +92,37 @@ function getSpoofedHeaders(ip, ua, country, timezone) {
 // ----------------- Proxy Testing -----------------
 async function testProxy(proxyUrl) {
   try {
-    // Skip testing if proxy URL is malformed
-    if (!proxyUrl || (proxyUrl.match(/:\/\//g) || []).length > 1) {
-      logWarn(`Skipping malformed proxy: ${proxyUrl}`);
-      return { working: false };
-    }
-    
+    if (!proxyUrl) return { working: false };
+
     const fetch = (await import("node-fetch")).default;
     const agent = new SocksProxyAgent(proxyUrl);
 
     const res = await fetch("https://api.ipify.org?format=json", {
       agent,
-      timeout: 5000, // Reduced timeout for faster testing
+      timeout: 5000,
     });
 
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
     const data = await res.json();
     return { working: true, ip: data.ip };
   } catch (err) {
-    logWarn(`Proxy ${proxyUrl} failed: ${err.message}`);
+    logWarn(`Proxy failed (${proxyUrl}): ${err.message}`);
     return { working: false };
   }
 }
 
 async function getWorkingProxy() {
-  if (proxies.length === 0) {
-    logWarn("No proxies available. Using direct connection.");
-    return null;
-  }
-  
-  // Test a random subset of proxies (not all to save time)
+  if (proxies.length === 0) return null;
+
   const testProxies = [...proxies].sort(() => 0.5 - Math.random()).slice(0, 5);
-  
   for (let proxy of testProxies) {
     logInfo(`Testing proxy: ${proxy}`);
-    const test = await testProxy(proxy);
-    if (test.working) {
-      logInfo(`Proxy working: ${proxy} (IP: ${test.ip})`);
-      return { url: proxy, ip: test.ip };
+    const result = await testProxy(proxy);
+    if (result.working) {
+      logInfo(`Working proxy: ${proxy} (IP: ${result.ip})`);
+      return { url: proxy, ip: result.ip };
     }
   }
-  
   logWarn("No working proxy found. Using direct connection.");
   return null;
 }
@@ -174,27 +132,20 @@ function getGASpoofScript(session, clientIp) {
   return `
 <script>
 (function() {
-  // Store original functions
   const originalSendBeacon = navigator.sendBeacon;
   const originalFetch = window.fetch;
-  
-  // Override sendBeacon
+
   navigator.sendBeacon = function(url, data) {
     if (url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Beacon intercepted:', url);
-      // You can modify the data here if needed
-      return originalSendBeacon.call(this, url, data);
+      console.log('[GA Spoof] Beacon:', url);
     }
     return originalSendBeacon.apply(this, arguments);
   };
 
-  // Override fetch
   window.fetch = function() {
     const url = arguments[0];
     if (url && typeof url === 'string' && url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Fetch intercepted:', url);
-      
-      // Add headers to request
+      console.log('[GA Spoof] Fetch:', url);
       if (arguments[1]) {
         arguments[1].headers = {
           ...arguments[1].headers,
@@ -234,7 +185,6 @@ app.get("/", async (req, res) => {
     });
 
     let body = await response.text();
-
     if (response.headers.get("content-type")?.includes("text/html")) {
       const sessionScript = `
       <script>
@@ -243,10 +193,7 @@ app.get("/", async (req, res) => {
         console.log("Country: ${session.country}");
         console.log("Timezone: ${session.timezone}");
       </script>`;
-      
-      // Generate GA spoof script with current session and client IP
-      const gaSpoofScript = getGASpoofScript(session, clientIp);
-      body = body.replace("</body>", sessionScript + gaSpoofScript + "</body>");
+      body = body.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
     }
 
     res.set("Content-Type", response.headers.get("content-type") || "text/html");
@@ -270,19 +217,18 @@ app.get("/health", (req, res) => {
 
 // ----------------- Start Server -----------------
 function startServer(port, host, retries = 10) {
-  const server = app
-    .listen(port, host, () => {
-      logInfo(`Server running: http://${host}:${port}`);
-      logInfo(`Proxying to: ${TARGET_SITE}`);
-    })
-    .on("error", (err) => {
-      if (err.code === "EADDRINUSE" && retries > 0) {
-        logWarn(`Port ${port} busy. Retrying on ${port + 1}...`);
-        startServer(port + 1, host, retries - 1);
-      } else {
-        logError(`Server failed: ${err.message}`);
-      }
-    });
+  const server = app.listen(port, host, () => {
+    logInfo(`Server running: http://${host}:${port}`);
+    logInfo(`Proxying to: ${TARGET_SITE}`);
+  })
+  .on("error", (err) => {
+    if (err.code === "EADDRINUSE" && retries > 0) {
+      logWarn(`Port ${port} busy. Retrying on ${port + 1}...`);
+      startServer(port + 1, host, retries - 1);
+    } else {
+      logError(`Server failed: ${err.message}`);
+    }
+  });
 
   return server;
 }
