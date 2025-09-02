@@ -9,9 +9,18 @@ require("dotenv").config();
 function getTimestamp() {
   return new Date().toISOString();
 }
-function logInfo(msg) { console.log(`${getTimestamp()} [INFO]: ${msg}`); }
-function logWarn(msg) { console.warn(`${getTimestamp()} [WARN]: ${msg}`); }
-function logError(msg) { console.error(`${getTimestamp()} [ERROR]: ${msg}`); }
+
+function logInfo(msg) { 
+  console.log(`${getTimestamp()} [INFO]: ${msg}`); 
+}
+
+function logWarn(msg) { 
+  console.warn(`${getTimestamp()} [WARN]: ${msg}`); 
+}
+
+function logError(msg) { 
+  console.error(`${getTimestamp()} [ERROR]: ${msg}`); 
+}
 
 // ----------------- Config -----------------
 const app = express();
@@ -30,7 +39,6 @@ try {
       .filter(Boolean)
       .map((line) => {
         // Fix common proxy format issues
-        // Remove any duplicate protocol prefixes
         if (line.includes("://")) {
           const parts = line.split("://");
           // If there are multiple protocols, use the last one
@@ -68,12 +76,15 @@ function getClientIp(req) {
     req.headers["x-forwarded-for"]?.split(",")[0] ||
     req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
+    req.connection?.socket?.remoteAddress ||
     "unknown"
   );
 }
+
 function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
+
 function createSession() {
   const userAgent = new UserAgent();
   return {
@@ -91,18 +102,29 @@ function createSession() {
     ]),
   };
 }
+
 function getSpoofedHeaders(ip, ua, country, timezone) {
+  // More realistic browser headers to avoid detection
   return {
     "User-Agent": ua,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+    "TE": "Trailers",
     "X-Forwarded-For": ip,
     "X-Real-IP": ip,
     "X-Client-IP": ip,
     "X-Forwarded-Host": ip,
     "X-Geo-Country": country,
     "X-Timezone": timezone,
-    Referer: "https://www.google.com/",
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/",
   };
 }
 
@@ -163,7 +185,9 @@ function getGASpoofScript(session, clientIp) {
 
   navigator.sendBeacon = function(url, data) {
     if (url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Beacon:', url);
+      console.log('[GA Spoof] Beacon intercepted:', url);
+      // Modify the data if needed
+      return originalSendBeacon.call(this, url, data);
     }
     return originalSendBeacon.apply(this, arguments);
   };
@@ -171,7 +195,9 @@ function getGASpoofScript(session, clientIp) {
   window.fetch = function() {
     const url = arguments[0];
     if (url && typeof url === 'string' && url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Fetch:', url);
+      console.log('[GA Spoof] Fetch intercepted:', url);
+      
+      // Add headers to request
       if (arguments[1]) {
         arguments[1].headers = {
           ...arguments[1].headers,
@@ -184,6 +210,37 @@ function getGASpoofScript(session, clientIp) {
   };
 })();
 </script>`;
+}
+
+// ----------------- Enhanced Fetch with Retry Logic -----------------
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  let lastError;
+  
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const fetch = (await import("node-fetch")).default;
+      const response = await fetch(url, options);
+      
+      // Check for Cloudflare or other blocking pages
+      const body = await response.text();
+      if (body.includes('challenge-form') || 
+          body.includes('Cloudflare') || 
+          body.includes('Please enable cookies') ||
+          body.includes('Sorry, you have been blocked')) {
+        throw new Error('Site is blocking requests with anti-bot protection');
+      }
+      
+      return { response, body };
+    } catch (err) {
+      lastError = err;
+      logWarn(`Attempt ${i + 1} failed: ${err.message}`);
+      
+      // Wait before retrying (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+  
+  throw lastError;
 }
 
 // ----------------- Routes -----------------
@@ -203,14 +260,16 @@ app.get("/", async (req, res) => {
       agent = new SocksProxyAgent(proxy.url);
     }
 
-    const fetch = (await import("node-fetch")).default;
-    const response = await fetch(TARGET_SITE, {
-      timeout: 10000,
+    const fetchOptions = {
+      timeout: 15000,
       headers: getSpoofedHeaders(proxyIp, session.userAgent, session.country, session.timezone),
       ...(agent && { agent }),
-    });
+      redirect: 'manual', // Handle redirects manually to avoid issues
+    };
 
-    let body = await response.text();
+    const { response, body } = await fetchWithRetry(TARGET_SITE, fetchOptions);
+
+    let modifiedBody = body;
     if (response.headers.get("content-type")?.includes("text/html")) {
       const sessionScript = `
       <script>
@@ -219,16 +278,39 @@ app.get("/", async (req, res) => {
         console.log("Country: ${session.country}");
         console.log("Timezone: ${session.timezone}");
       </script>`;
-      body = body.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
+      
+      // Inject scripts before closing body tag
+      if (modifiedBody.includes("</body>")) {
+        modifiedBody = modifiedBody.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
+      } else {
+        modifiedBody += sessionScript + getGASpoofScript(session, clientIp);
+      }
     }
 
-    res.set("Content-Type", response.headers.get("content-type") || "text/html");
-    res.send(body);
+    // Copy relevant headers from the original response
+    const contentType = response.headers.get("content-type") || "text/html";
+    res.set("Content-Type", contentType);
+    
+    // Copy other headers if needed
+    if (response.headers.get("cache-control")) {
+      res.set("Cache-Control", response.headers.get("cache-control"));
+    }
 
+    res.status(response.status).send(modifiedBody);
     logInfo(`Served ${TARGET_SITE} to ${clientIp} via ${proxyIp}`);
+
   } catch (err) {
     logError(`Fetch error: ${err.message}`);
-    res.status(500).send(`<h2>Error fetching site</h2><p>${err.message}</p>`);
+    res.status(500).send(`
+      <h2>Error accessing website</h2>
+      <p>${err.message}</p>
+      <p>This might be due to:</p>
+      <ul>
+        <li>Website anti-bot protection (like Cloudflare)</li>
+        <li>Proxy server issues</li>
+        <li>Network connectivity problems</li>
+      </ul>
+    `);
   }
 });
 
@@ -236,6 +318,7 @@ app.get("/health", (req, res) => {
   res.json({
     status: "OK",
     proxies: proxies.length,
+    workingProxies: proxies.filter(p => p.working).length,
     target: TARGET_SITE,
     timestamp: new Date().toISOString(),
   });
@@ -243,20 +326,37 @@ app.get("/health", (req, res) => {
 
 // ----------------- Start Server -----------------
 function startServer(port, host, retries = 10) {
+  if (retries <= 0) {
+    logError("Failed to start server after multiple attempts");
+    process.exit(1);
+  }
+
   const server = app.listen(port, host, () => {
     logInfo(`Server running: http://${host}:${port}`);
     logInfo(`Proxying to: ${TARGET_SITE}`);
-  })
-  .on("error", (err) => {
-    if (err.code === "EADDRINUSE" && retries > 0) {
+  }).on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
       logWarn(`Port ${port} busy. Retrying on ${port + 1}...`);
       startServer(port + 1, host, retries - 1);
     } else {
       logError(`Server failed: ${err.message}`);
+      process.exit(1);
     }
   });
 
   return server;
 }
 
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  logInfo('Shutting down server...');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  logInfo('Shutting down server...');
+  process.exit(0);
+});
+
+// Start the server
 startServer(PORT, HOST);
