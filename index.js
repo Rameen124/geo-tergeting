@@ -43,13 +43,24 @@ try {
           const parts = line.split("://");
           if (parts.length > 2) {
             // If there are multiple protocols, keep only the last one
-            return parts[parts.length - 2] + "://" + parts[parts.length - 1];
+            const fixedProxy = parts[parts.length - 2] + "://" + parts[parts.length - 1];
+            logWarn(`Fixed malformed proxy: ${line} -> ${fixedProxy}`);
+            return fixedProxy;
           }
           return line;
         } else {
           // Add default protocol if missing
           return `socks5://${line}`;
         }
+      })
+      .filter(proxy => {
+        // Filter out any remaining malformed proxies
+        const protocolCount = (proxy.match(/:\/\//g) || []).length;
+        if (protocolCount > 1) {
+          logWarn(`Skipping malformed proxy: ${proxy}`);
+          return false;
+        }
+        return true;
       });
     
     logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
@@ -116,7 +127,7 @@ function getSpoofedHeaders(ip, ua, country, timezone) {
 async function testProxy(proxyUrl) {
   try {
     // Skip testing if proxy URL is malformed
-    if (!proxyUrl || !proxyUrl.includes("://") || proxyUrl.split("://").length > 2) {
+    if (!proxyUrl || (proxyUrl.match(/:\/\//g) || []).length > 1) {
       logWarn(`Skipping malformed proxy: ${proxyUrl}`);
       return { working: false };
     }
@@ -251,7 +262,7 @@ app.get("/", async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", (req, res) {
   res.json({
     status: "OK",
     proxies: proxies.length,
