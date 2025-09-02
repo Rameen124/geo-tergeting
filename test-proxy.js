@@ -1,86 +1,129 @@
 const { SocksProxyAgent } = require("socks-proxy-agent");
 const fs = require("fs");
-const winston = require("winston");
 
-// Configure logging
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.Console({
-      format: winston.format.simple()
-    })
-  ]
-});
+// ----------------- Simple Logging Functions -----------------
+function getTimestamp() {
+  return new Date().toISOString();
+}
+
+function logInfo(message) {
+  console.log(`${getTimestamp()} [INFO]: ${message}`);
+}
+
+function logWarn(message) {
+  console.warn(`${getTimestamp()} [WARN]: ${message}`);
+}
+
+function logError(message) {
+  console.error(`${getTimestamp()} [ERROR]: ${message}`);
+}
 
 // Load proxies from proxies.txt
 let proxies = [];
 try {
-  proxies = fs
-    .readFileSync("proxies.txt", "utf-8")
-    .split("\n")
-    .map(line => line.trim())
-    .filter(line => line !== "")
-    .map(line => {
-      if (!line.startsWith("socks5://") && !line.startsWith("socks4://") && !line.startsWith("http://")) {
-        return `socks5://${line}`;
-      }
-      return line;
-    });
-  
-  logger.info(`Loaded ${proxies.length} proxies from proxies.txt`);
+  if (fs.existsSync("proxies.txt")) {
+    const proxyData = fs.readFileSync("proxies.txt", "utf-8");
+    proxies = proxyData
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        // Fix common proxy format issues
+        // Remove any duplicate protocol prefixes
+        if (line.includes("://")) {
+          const parts = line.split("://");
+          // If there are multiple protocols, use the last one
+          if (parts.length > 2) {
+            const fixedLine = parts[parts.length - 2] + "://" + parts[parts.length - 1];
+            logWarn(`Fixed proxy format: ${line} -> ${fixedLine}`);
+            return fixedLine;
+          }
+          return line;
+        }
+        // Add default protocol if missing
+        return `socks5h://${line}`;
+      })
+      // Filter out any remaining malformed proxies
+      .filter(proxy => {
+        const protocolCount = (proxy.match(/:\/\//g) || []).length;
+        if (protocolCount > 1) {
+          logWarn(`Skipping malformed proxy: ${proxy}`);
+          return false;
+        }
+        return true;
+      });
+
+    logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
+  } else {
+    logWarn("proxies.txt not found.");
+    process.exit(1);
+  }
 } catch (err) {
-  logger.error("Error loading proxies:", err.message);
+  logError(`Proxy load failed: ${err.message}`);
   process.exit(1);
 }
 
 // Test proxy
 async function testProxy(proxyUrl) {
   try {
-    const fetch = (await import('node-fetch')).default;
+    if (!proxyUrl) return { working: false };
+
+    // Skip testing if proxy URL is malformed
+    const protocolCount = (proxyUrl.match(/:\/\//g) || []).length;
+    if (protocolCount > 1) {
+      logWarn(`Skipping malformed proxy: ${proxyUrl}`);
+      return { working: false };
+    }
+
+    const fetch = (await import("node-fetch")).default;
     const agent = new SocksProxyAgent(proxyUrl);
-    
+
     const res = await fetch("https://api.ipify.org?format=json", {
       agent,
-      timeout: 8000,
+      timeout: 5000,
     });
-    
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return { working: true, ip: data.ip };
   } catch (err) {
-    return { working: false, error: err.message };
+    logWarn(`Proxy failed (${proxyUrl}): ${err.message}`);
+    return { working: false };
   }
 }
 
 // Test all proxies
 async function testAllProxies() {
-  logger.info("Testing all proxies...");
+  logInfo("Testing all proxies...");
   
   const results = [];
+  let workingCount = 0;
+  
   for (let proxy of proxies) {
-    logger.info(`Testing: ${proxy}`);
+    logInfo(`Testing: ${proxy}`);
     const result = await testProxy(proxy);
     results.push({ proxy, ...result });
     
     if (result.working) {
-      logger.info(`✅ Working: ${proxy} (IP: ${result.ip})`);
+      logInfo(`✅ Working: ${proxy} (IP: ${result.ip})`);
+      workingCount++;
     } else {
-      logger.info(`❌ Failed: ${proxy} (Error: ${result.error})`);
+      logInfo(`❌ Failed: ${proxy}`);
     }
     
     // Wait a bit between tests
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
   
-  const working = results.filter(r => r.working);
-  logger.info(`\nResults: ${working.length}/${proxies.length} proxies working`);
+  logInfo(`\nResults: ${workingCount}/${proxies.length} proxies working`);
+  
+  // Display working proxies
+  if (workingCount > 0) {
+    logInfo("\nWorking proxies:");
+    results.filter(r => r.working).forEach(r => {
+      logInfo(`- ${r.proxy} (IP: ${r.ip})`);
+    });
+  }
   
   return results;
 }
@@ -89,6 +132,6 @@ async function testAllProxies() {
 testAllProxies().then(results => {
   process.exit(0);
 }).catch(err => {
-  logger.error(`Test error: ${err.message}`);
+  logError(`Test error: ${err.message}`);
   process.exit(1);
 });
