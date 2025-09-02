@@ -23,18 +23,35 @@ const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
 let proxies = [];
 try {
   if (fs.existsSync("proxies.txt")) {
-    proxies = fs
-      .readFileSync("proxies.txt", "utf-8")
+    const proxyData = fs.readFileSync("proxies.txt", "utf-8");
+    proxies = proxyData
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        // Agar proxy already protocol ke sath hai (socks/http/https) → as is use karo
-        if (/^(socks5h?|socks4|https?):\/\//i.test(line)) {
+        // Fix common proxy format issues
+        // Remove any duplicate protocol prefixes
+        if (line.includes("://")) {
+          const parts = line.split("://");
+          // If there are multiple protocols, use the last one
+          if (parts.length > 2) {
+            const fixedLine = parts[parts.length - 2] + "://" + parts[parts.length - 1];
+            logWarn(`Fixed proxy format: ${line} -> ${fixedLine}`);
+            return fixedLine;
+          }
           return line;
         }
-        // Warna default socks5h:// add karo
+        // Add default protocol if missing
         return `socks5h://${line}`;
+      })
+      // Filter out any remaining malformed proxies
+      .filter(proxy => {
+        const protocolCount = (proxy.match(/:\/\//g) || []).length;
+        if (protocolCount > 1) {
+          logWarn(`Skipping malformed proxy: ${proxy}`);
+          return false;
+        }
+        return true;
       });
 
     logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
@@ -94,6 +111,13 @@ async function testProxy(proxyUrl) {
   try {
     if (!proxyUrl) return { working: false };
 
+    // Skip testing if proxy URL is malformed
+    const protocolCount = (proxyUrl.match(/:\/\//g) || []).length;
+    if (protocolCount > 1) {
+      logWarn(`Skipping malformed proxy: ${proxyUrl}`);
+      return { working: false };
+    }
+
     const fetch = (await import("node-fetch")).default;
     const agent = new SocksProxyAgent(proxyUrl);
 
@@ -114,7 +138,9 @@ async function testProxy(proxyUrl) {
 async function getWorkingProxy() {
   if (proxies.length === 0) return null;
 
-  const testProxies = [...proxies].sort(() => 0.5 - Math.random()).slice(0, 5);
+  // Test a random subset of proxies (not all to save time)
+  const testProxies = [...proxies].sort(() => 0.5 - Math.random()).slice(0, Math.min(5, proxies.length));
+  
   for (let proxy of testProxies) {
     logInfo(`Testing proxy: ${proxy}`);
     const result = await testProxy(proxy);
