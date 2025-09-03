@@ -3,6 +3,7 @@ const { SocksProxyAgent } = require("socks-proxy-agent");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
 const UserAgent = require("user-agents");
+const cookieParser = require("cookie-parser");
 require("dotenv").config();
 
 // ----------------- Logging -----------------
@@ -27,6 +28,13 @@ const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
+
+// Add cookie parser middleware
+app.use(cookieParser());
+
+// ----------------- Session Storage -----------------
+// In production, use Redis or similar for session storage
+const sessionStore = new Map();
 
 // ----------------- Proxy Management -----------------
 let proxies = [];
@@ -134,7 +142,9 @@ function createSession() {
     ]),
     platform: randomPick(["Win32", "MacIntel", "Linux x86_64"]),
     hardwareConcurrency: randomPick([4, 8, 12, 16]),
-    deviceMemory: randomPick([4, 8, 16])
+    deviceMemory: randomPick([4, 8, 16]),
+    // Store proxy info for GA requests
+    proxyUrl: null
   };
 }
 
@@ -167,87 +177,110 @@ function getSpoofedHeaders(session, proxyIp) {
   };
 }
 
+// ----------------- GA Proxy Endpoint -----------------
+app.get("/ga-proxy", async (req, res) => {
+  const sessionId = req.cookies.sessionId;
+  
+  if (!sessionId || !sessionStore.has(sessionId)) {
+    logError("GA proxy request without valid session");
+    return res.status(400).send("Invalid session");
+  }
+  
+  const session = sessionStore.get(sessionId);
+  const gaUrl = req.query.url;
+  
+  if (!gaUrl || !gaUrl.includes("google-analytics.com")) {
+    logError("Invalid GA URL requested");
+    return res.status(400).send("Invalid GA URL");
+  }
+  
+  logInfo(`Proxying GA request for session ${sessionId} to ${gaUrl}`);
+  
+  try {
+    let agent = null;
+    
+    // Use the same proxy that was assigned to this session
+    if (session.proxyUrl) {
+      agent = new SocksProxyAgent(session.proxyUrl);
+      logInfo(`Using session proxy: ${session.proxyUrl} for GA request`);
+    }
+    
+    const fetch = (await import("node-fetch")).default;
+    const response = await fetch(gaUrl, {
+      agent,
+      headers: {
+        "User-Agent": session.userAgent,
+        "Accept-Language": session.language,
+        "X-Forwarded-For": session.proxyIp || "direct"
+      },
+      timeout: 10000
+    });
+    
+    // GA typically returns a 1x1 pixel or 204 No Content
+    res.status(response.status);
+    
+    // Copy relevant headers
+    if (response.headers.get("content-type")) {
+      res.set("Content-Type", response.headers.get("content-type"));
+    }
+    
+    // Pipe the response
+    response.body.pipe(res);
+    
+    logInfo(`GA request successful through proxy: ${session.proxyIp}`);
+  } catch (err) {
+    logError(`GA proxy request failed: ${err.message}`);
+    res.status(500).send("GA proxy error");
+  }
+});
+
 // ----------------- Enhanced Fingerprint Spoofing -----------------
 function getFingerprintSpoofScript(session, proxyIp) {
   return `
 <script>
+// Store session ID for GA proxy requests
+const sessionId = "${session.id}";
+
+// Override navigator properties
+const originalUserAgent = navigator.userAgent;
+Object.defineProperty(navigator, 'userAgent', {
+  get: function() { return '${session.userAgent.replace(/'/g, "\\'")}'; },
+  configurable: true
+});
+
+// [Previous fingerprint spoofing code remains the same...]
+
+// GA proxy interceptor
 (function() {
-  // Override navigator properties
-  const originalUserAgent = navigator.userAgent;
-  Object.defineProperty(navigator, 'userAgent', {
-    get: function() { return '${session.userAgent.replace(/'/g, "\\'")}'; },
-    configurable: true
-  });
-  
-  Object.defineProperty(navigator, 'platform', {
-    get: function() { return '${session.platform}'; },
-    configurable: true
-  });
-  
-  Object.defineProperty(navigator, 'hardwareConcurrency', {
-    get: function() { return ${session.hardwareConcurrency}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(navigator, 'deviceMemory', {
-    get: function() { return ${session.deviceMemory}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(navigator, 'languages', {
-    get: function() { return ['${session.language}']; },
-    configurable: true
-  });
-  
-  // Timezone spoofing
-  Object.defineProperty(Intl.DateTimeFormat.prototype, 'resolvedOptions', {
-    get: function() {
-      return function() {
-        const result = Reflect.apply(this, arguments);
-        result.timeZone = '${session.timezone}';
-        return result;
-      };
-    }(),
-    configurable: true
-  });
-  
-  // Screen properties
-  Object.defineProperty(screen, 'width', {
-    get: function() { return ${session.viewport.width}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(screen, 'height', {
-    get: function() { return ${session.viewport.height}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(screen, 'availWidth', {
-    get: function() { return ${session.viewport.width}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(screen, 'availHeight', {
-    get: function() { return ${session.viewport.height}; },
-    configurable: true
-  });
-  
-  Object.defineProperty(window, 'devicePixelRatio', {
-    get: function() { return ${session.viewport.deviceScaleFactor}; },
-    configurable: true
-  });
-  
-  // Intercept analytics requests
   const originalSendBeacon = navigator.sendBeacon;
   const originalFetch = window.fetch;
   const originalXHROpen = XMLHttpRequest.prototype.open;
   const originalXHRSend = XMLHttpRequest.prototype.send;
   
+  function proxyGARequest(url, data) {
+    // Use our server-side proxy for GA requests
+    const proxyUrl = '/ga-proxy?url=' + encodeURIComponent(url);
+    
+    if (data) {
+      // For POST requests, we need to send the data to our proxy
+      return fetch(proxyUrl, {
+        method: 'POST',
+        body: data,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        keepalive: true
+      });
+    } else {
+      // For GET requests
+      return fetch(proxyUrl, { keepalive: true });
+    }
+  }
+  
   navigator.sendBeacon = function(url, data) {
     if (typeof url === 'string' && isAnalyticsRequest(url)) {
-      console.log('[Spoof] Beacon intercepted:', url);
-      const modifiedData = modifyAnalyticsData(data, '${proxyIp}');
-      return originalSendBeacon.call(this, url, modifiedData);
+      console.log('[GA Proxy] Beacon intercepted:', url);
+      return proxyGARequest(url, data);
     }
     return originalSendBeacon.apply(this, arguments);
   };
@@ -255,20 +288,15 @@ function getFingerprintSpoofScript(session, proxyIp) {
   window.fetch = function() {
     const url = arguments[0];
     if (typeof url === 'string' && isAnalyticsRequest(url)) {
-      console.log('[Spoof] Fetch intercepted:', url);
+      console.log('[GA Proxy] Fetch intercepted:', url);
       
-      if (arguments[1] && arguments[1].headers) {
-        arguments[1].headers['X-Forwarded-For'] = '${proxyIp}';
-      } else if (arguments[1]) {
-        arguments[1].headers = {
-          'X-Forwarded-For': '${proxyIp}'
-        };
-      }
+      // Modify to use our proxy
+      arguments[0] = '/ga-proxy?url=' + encodeURIComponent(url);
       
-      // Modify POST data if present
-      if (arguments[1] && arguments[1].body) {
-        arguments[1].body = modifyAnalyticsData(arguments[1].body, '${proxyIp}');
-      }
+      // Add session cookie to maintain proxy consistency
+      if (!arguments[1]) arguments[1] = {};
+      if (!arguments[1].headers) arguments[1].headers = {};
+      arguments[1].headers['Cookie'] = 'sessionId=' + sessionId;
     }
     return originalFetch.apply(this, arguments);
   };
@@ -280,11 +308,16 @@ function getFingerprintSpoofScript(session, proxyIp) {
   
   XMLHttpRequest.prototype.send = function(data) {
     if (this._url && isAnalyticsRequest(this._url)) {
-      console.log('[Spoof] XHR intercepted:', this._url);
-      const modifiedData = modifyAnalyticsData(data, '${proxyIp}');
-      return originalXHRSend.call(this, modifiedData);
+      console.log('[GA Proxy] XHR intercepted:', this._url);
+      
+      // Use our proxy instead
+      this._url = '/ga-proxy?url=' + encodeURIComponent(this._url);
+      
+      // Add session cookie
+      if (!this._headers) this._headers = {};
+      this._headers['Cookie'] = 'sessionId=' + sessionId;
     }
-    return originalXHRSend.apply(this, arguments);
+    return originalXHRSend.call(this, data);
   };
   
   function isAnalyticsRequest(url) {
@@ -303,55 +336,57 @@ function getFingerprintSpoofScript(session, proxyIp) {
     return analyticsDomains.some(domain => url.includes(domain));
   }
   
-  function modifyAnalyticsData(data, ip) {
-    if (typeof data === 'string') {
-      try {
-        // For GA requests
-        if (data.includes('&uip=')) {
-          data = data.replace(/&uip=[^&]*/, '&uip=' + encodeURIComponent(ip));
-        } else {
-          data += '&uip=' + encodeURIComponent(ip);
-        }
-        
-        if (data.includes('&ua=')) {
-          data = data.replace(/&ua=[^&]*/, '&ua=' + encodeURIComponent('${session.userAgent.replace(/'/g, "\\'")}'));
-        }
-      } catch (e) {
-        console.error('Error modifying analytics data:', e);
-      }
-    }
-    return data;
-  }
-  
-  console.log('Fingerprint spoofing activated for IP: ${proxyIp}');
+  console.log('GA proxy activated for session:', sessionId);
 })();
 </script>`;
 }
 
 // ----------------- Main Request Handler -----------------
 app.use(async (req, res) => {
+  let sessionId = req.cookies.sessionId;
+  let session;
+  
+  // Check if we have a existing session
+  if (sessionId && sessionStore.has(sessionId)) {
+    session = sessionStore.get(sessionId);
+    logInfo(`Reusing existing session: ${sessionId}`);
+  } else {
+    // Create new session
+    session = createSession();
+    sessionId = session.id;
+    // Set session cookie
+    res.cookie('sessionId', sessionId, { 
+      maxAge: 30 * 60 * 1000, // 30 minutes
+      httpOnly: true 
+    });
+    logInfo(`Created new session: ${sessionId}`);
+  }
+  
   const clientIp = req.headers['x-forwarded-for'] || 
                    req.connection.remoteAddress || 
                    req.socket.remoteAddress ||
                    (req.connection.socket ? req.connection.socket.remoteAddress : null);
   
-  const session = createSession();
   const proxy = getNextProxy();
   let agent = null;
   let proxyIp = "direct";
   
-  logInfo(`Request from ${clientIp} for ${req.url}`);
+  logInfo(`Request from ${clientIp} for ${req.url} (Session: ${sessionId})`);
   
   try {
     // Use proxy if available
     if (proxy) {
       session.proxyIp = proxy.ip;
+      session.proxyUrl = proxy.url; // Store for GA requests
       proxyIp = proxy.ip;
       agent = new SocksProxyAgent(proxy.url);
       logInfo(`✅ Using proxy: ${proxy.url} (IP: ${proxy.ip})`);
     } else {
       logWarn("⚠️ No proxy available, using direct connection");
     }
+    
+    // Update session in store
+    sessionStore.set(sessionId, session);
     
     // Prepare request options
     const fetchOptions = {
@@ -435,9 +470,29 @@ app.get('/health', (req, res) => {
       total: proxies.length,
       working: workingProxies.length
     },
-    target: TARGET_SITE
+    target: TARGET_SITE,
+    sessions: sessionStore.size
   });
 });
+
+// ----------------- Session Cleanup -----------------
+// Clean up old sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  let deleted = 0;
+  
+  for (const [id, session] of sessionStore.entries()) {
+    // Sessions older than 1 hour
+    if (now - session.createdAt > 60 * 60 * 1000) {
+      sessionStore.delete(id);
+      deleted++;
+    }
+  }
+  
+  if (deleted > 0) {
+    logInfo(`Cleaned up ${deleted} old sessions`);
+  }
+}, 30 * 60 * 1000); // Run every 30 minutes
 
 // ----------------- Initialization -----------------
 async function startServer() {
