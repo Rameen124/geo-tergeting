@@ -27,7 +27,8 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
+const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
+const DOMAIN = process.env.DOMAIN || "havali.xyz";
 
 // Add cookie parser middleware
 app.use(cookieParser());
@@ -225,6 +226,10 @@ app.get("/ga-proxy", async (req, res) => {
       res.set("Content-Type", response.headers.get("content-type"));
     }
     
+    // Set CORS headers to allow requests from your domain
+    res.set("Access-Control-Allow-Origin", `https://${DOMAIN}`);
+    res.set("Access-Control-Allow-Credentials", "true");
+    
     // Pipe the response
     response.body.pipe(res);
     
@@ -233,6 +238,15 @@ app.get("/ga-proxy", async (req, res) => {
     logError(`GA proxy request failed: ${err.message}`);
     res.status(500).send("GA proxy error");
   }
+});
+
+// Allow OPTIONS requests for CORS
+app.options("/ga-proxy", (req, res) => {
+  res.set("Access-Control-Allow-Origin", `https://${DOMAIN}`);
+  res.set("Access-Control-Allow-Credentials", "true");
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.sendStatus(200);
 });
 
 // ----------------- Health Endpoint -----------------
@@ -328,7 +342,7 @@ Object.defineProperty(window, 'devicePixelRatio', {
   
   function proxyGARequest(url, data) {
     // Use our server-side proxy for GA requests
-    const proxyUrl = '/ga-proxy?url=' + encodeURIComponent(url);
+    const proxyUrl = 'https://${DOMAIN}/ga-proxy?url=' + encodeURIComponent(url);
     
     if (data) {
       // For POST requests, we need to send the data to our proxy
@@ -338,11 +352,15 @@ Object.defineProperty(window, 'devicePixelRatio', {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
         },
+        credentials: 'include', // Include cookies
         keepalive: true
       });
     } else {
       // For GET requests
-      return fetch(proxyUrl, { keepalive: true });
+      return fetch(proxyUrl, { 
+        credentials: 'include', // Include cookies
+        keepalive: true 
+      });
     }
   }
   
@@ -361,12 +379,11 @@ Object.defineProperty(window, 'devicePixelRatio', {
       
       // Modify to use our proxy
       const newArgs = [...arguments];
-      newArgs[0] = '/ga-proxy?url=' + encodeURIComponent(url);
+      newArgs[0] = 'https://${DOMAIN}/ga-proxy?url=' + encodeURIComponent(url);
       
-      // Add session cookie to maintain proxy consistency
+      // Ensure credentials are included
       if (!newArgs[1]) newArgs[1] = {};
-      if (!newArgs[1].headers) newArgs[1].headers = {};
-      newArgs[1].headers['Cookie'] = 'sessionId=' + sessionId;
+      newArgs[1].credentials = 'include';
       
       return originalFetch.apply(this, newArgs);
     }
@@ -383,11 +400,10 @@ Object.defineProperty(window, 'devicePixelRatio', {
       console.log('[GA Proxy] XHR intercepted:', this._url);
       
       // Use our proxy instead
-      this._url = '/ga-proxy?url=' + encodeURIComponent(this._url);
+      this._url = 'https://${DOMAIN}/ga-proxy?url=' + encodeURIComponent(this._url);
       
-      // Add session cookie
-      if (!this.headers) this.headers = {};
-      this.setRequestHeader('Cookie', 'sessionId=' + sessionId);
+      // Ensure credentials are included
+      this.withCredentials = true;
     }
     return originalXHRSend.call(this, data);
   };
@@ -430,7 +446,10 @@ app.use(async (req, res) => {
     // Set session cookie
     res.cookie('sessionId', sessionId, { 
       maxAge: 30 * 60 * 1000, // 30 minutes
-      httpOnly: true 
+      httpOnly: true,
+      domain: DOMAIN,
+      secure: true,
+      sameSite: 'none'
     });
     logInfo(`Created new session: ${sessionId}`);
   }
