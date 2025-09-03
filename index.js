@@ -26,89 +26,128 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
+const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
 
-// ----------------- Proxy Loader -----------------
+// ----------------- Proxy Management -----------------
 let proxies = [];
-try {
-  if (fs.existsSync("proxies.txt")) {
-    const proxyData = fs.readFileSync("proxies.txt", "utf-8");
-    proxies = proxyData
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        // Fix common proxy format issues
-        if (line.includes("://")) {
-          const parts = line.split("://");
-          // If there are multiple protocols, use the last one
-          if (parts.length > 2) {
-            const fixedLine = parts[parts.length - 2] + "://" + parts[parts.length - 1];
-            logWarn(`Fixed proxy format: ${line} -> ${fixedLine}`);
-            return fixedLine;
+let workingProxies = [];
+let proxyIndex = 0;
+
+function loadProxies() {
+  try {
+    if (fs.existsSync("proxies.txt")) {
+      const proxyData = fs.readFileSync("proxies.txt", "utf-8");
+      proxies = proxyData
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          if (!line.includes("://")) {
+            return `socks5h://${line}`;
           }
           return line;
-        }
-        // Add default protocol if missing
-        return `socks5h://${line}`;
-      })
-      // Filter out any remaining malformed proxies
-      .filter(proxy => {
-        const protocolCount = (proxy.match(/:\/\//g) || []).length;
-        if (protocolCount > 1) {
-          logWarn(`Skipping malformed proxy: ${proxy}`);
-          return false;
-        }
-        return true;
-      });
-
-    logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
-  } else {
-    logWarn("proxies.txt not found. Running without proxies.");
+        });
+      
+      logInfo(`Loaded ${proxies.length} proxies from proxies.txt`);
+    } else {
+      logWarn("proxies.txt not found. Running without proxies.");
+    }
+  } catch (err) {
+    logError(`Proxy load failed: ${err.message}`);
   }
-} catch (err) {
-  logError(`Proxy load failed: ${err.message}`);
 }
 
-// ----------------- Helpers -----------------
-function getClientIp(req) {
-  return (
-    req.headers["x-forwarded-for"]?.split(",")[0] ||
-    req.connection?.remoteAddress ||
-    req.socket?.remoteAddress ||
-    req.connection?.socket?.remoteAddress ||
-    "unknown"
-  );
+async function testProxy(proxyUrl) {
+  try {
+    const fetch = (await import("node-fetch")).default;
+    const agent = new SocksProxyAgent(proxyUrl);
+    
+    const response = await fetch("https://api.ipify.org?format=json", {
+      agent,
+      timeout: 5000
+    });
+    
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    const data = await response.json();
+    return { working: true, ip: data.ip, url: proxyUrl };
+  } catch (err) {
+    return { working: false, error: err.message };
+  }
+}
+
+async function initializeProxies() {
+  loadProxies();
+  
+  if (proxies.length === 0) {
+    logWarn("No proxies available. Running in direct mode.");
+    return;
+  }
+  
+  logInfo("Testing proxy pool...");
+  
+  const testPromises = proxies.map(async (proxy) => {
+    const result = await testProxy(proxy);
+    if (result.working) {
+      workingProxies.push(result);
+      logInfo(`✅ Proxy working: ${proxy} (IP: ${result.ip})`);
+    } else {
+      logWarn(`❌ Proxy failed: ${proxy} - ${result.error}`);
+    }
+    return result;
+  });
+  
+  await Promise.all(testPromises);
+  
+  logInfo(`Proxy initialization complete. ${workingProxies.length} of ${proxies.length} proxies working.`);
+}
+
+function getNextProxy() {
+  if (workingProxies.length === 0) return null;
+  
+  // Use round-robin for proxy rotation
+  const proxy = workingProxies[proxyIndex % workingProxies.length];
+  proxyIndex++;
+  
+  return proxy;
+}
+
+// ----------------- Session Management -----------------
+function createSession() {
+  const userAgent = new UserAgent();
+  const viewport = userAgent.data;
+  
+  return {
+    id: uuidv4(),
+    proxyIp: null,
+    userAgent: userAgent.toString(),
+    viewport: {
+      width: viewport.width || 1920,
+      height: viewport.height || 1080,
+      deviceScaleFactor: viewport.deviceScaleFactor || 1,
+      isMobile: viewport.isMobile || false
+    },
+    language: randomPick(["en-US", "en-GB", "fr-FR", "de-DE", "es-ES"]),
+    timezone: randomPick([
+      "America/New_York", "Europe/London", "Asia/Karachi", 
+      "Asia/Kolkata", "Europe/Berlin", "Asia/Dubai"
+    ]),
+    platform: randomPick(["Win32", "MacIntel", "Linux x86_64"]),
+    hardwareConcurrency: randomPick([4, 8, 12, 16]),
+    deviceMemory: randomPick([4, 8, 16])
+  };
 }
 
 function randomPick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function createSession() {
-  const userAgent = new UserAgent();
+// ----------------- Header Spoofing -----------------
+function getSpoofedHeaders(session, proxyIp) {
   return {
-    id: uuidv4(),
-    proxyIp: null,
-    userAgent: userAgent.toString(),
-    country: randomPick(["US", "IN", "PK", "UK", "DE", "FR", "CA", "AU"]),
-    timezone: randomPick([
-      "America/New_York",
-      "Europe/London",
-      "Asia/Karachi",
-      "Asia/Kolkata",
-      "Europe/Berlin",
-      "Asia/Dubai",
-    ]),
-  };
-}
-
-function getSpoofedHeaders(ip, ua, country, timezone) {
-  // More realistic browser headers to avoid detection
-  return {
-    "User-Agent": ua,
+    "User-Agent": session.userAgent,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": session.language,
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -118,232 +157,297 @@ function getSpoofedHeaders(ip, ua, country, timezone) {
     "Sec-Fetch-User": "?1",
     "Cache-Control": "max-age=0",
     "TE": "Trailers",
-    "X-Forwarded-For": ip,
-    "X-Real-IP": ip,
-    "X-Client-IP": ip,
-    "X-Forwarded-Host": ip,
-    "X-Geo-Country": country,
-    "X-Timezone": timezone,
-    "Referer": "https://www.google.com/",
+    // Override any potential IP leak headers
+    "X-Forwarded-For": proxyIp,
+    "X-Real-IP": proxyIp,
+    "Forwarded": `for=${proxyIp};proto=https`,
+    "X-Geo-Country": session.timezone.split('/')[0] === 'America' ? 'US' : 
+                     session.timezone.split('/')[0] === 'Europe' ? 'DE' : 'IN',
+    "X-Timezone": session.timezone
   };
 }
 
-// ----------------- Proxy Testing -----------------
-async function testProxy(proxyUrl) {
-  try {
-    if (!proxyUrl) return { working: false };
-
-    // Skip testing if proxy URL is malformed
-    const protocolCount = (proxyUrl.match(/:\/\//g) || []).length;
-    if (protocolCount > 1) {
-      logWarn(`Skipping malformed proxy: ${proxyUrl}`);
-      return { working: false };
-    }
-
-    const fetch = (await import("node-fetch")).default;
-    const agent = new SocksProxyAgent(proxyUrl);
-
-    const res = await fetch("https://api.ipify.org?format=json", {
-      agent,
-      timeout: 5000,
-    });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return { working: true, ip: data.ip };
-  } catch (err) {
-    logWarn(`Proxy failed (${proxyUrl}): ${err.message}`);
-    return { working: false };
-  }
-}
-
-async function getWorkingProxy() {
-  if (proxies.length === 0) return null;
-
-  // Test a random subset of proxies (not all to save time)
-  const testProxies = [...proxies].sort(() => 0.5 - Math.random()).slice(0, Math.min(5, proxies.length));
-  
-  for (let proxy of testProxies) {
-    logInfo(`Testing proxy: ${proxy}`);
-    const result = await testProxy(proxy);
-    if (result.working) {
-      logInfo(`Working proxy: ${proxy} (IP: ${result.ip})`);
-      return { url: proxy, ip: result.ip };
-    }
-  }
-  logWarn("No working proxy found. Using direct connection.");
-  return null;
-}
-
-// ----------------- GA Spoof Script -----------------
-function getGASpoofScript(session, clientIp) {
+// ----------------- Enhanced Fingerprint Spoofing -----------------
+function getFingerprintSpoofScript(session, proxyIp) {
   return `
 <script>
 (function() {
+  // Override navigator properties
+  const originalUserAgent = navigator.userAgent;
+  Object.defineProperty(navigator, 'userAgent', {
+    get: function() { return '${session.userAgent.replace(/'/g, "\\'")}'; },
+    configurable: true
+  });
+  
+  Object.defineProperty(navigator, 'platform', {
+    get: function() { return '${session.platform}'; },
+    configurable: true
+  });
+  
+  Object.defineProperty(navigator, 'hardwareConcurrency', {
+    get: function() { return ${session.hardwareConcurrency}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(navigator, 'deviceMemory', {
+    get: function() { return ${session.deviceMemory}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(navigator, 'languages', {
+    get: function() { return ['${session.language}']; },
+    configurable: true
+  });
+  
+  // Timezone spoofing
+  Object.defineProperty(Intl.DateTimeFormat.prototype, 'resolvedOptions', {
+    get: function() {
+      return function() {
+        const result = Reflect.apply(this, arguments);
+        result.timeZone = '${session.timezone}';
+        return result;
+      };
+    }(),
+    configurable: true
+  });
+  
+  // Screen properties
+  Object.defineProperty(screen, 'width', {
+    get: function() { return ${session.viewport.width}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(screen, 'height', {
+    get: function() { return ${session.viewport.height}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(screen, 'availWidth', {
+    get: function() { return ${session.viewport.width}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(screen, 'availHeight', {
+    get: function() { return ${session.viewport.height}; },
+    configurable: true
+  });
+  
+  Object.defineProperty(window, 'devicePixelRatio', {
+    get: function() { return ${session.viewport.deviceScaleFactor}; },
+    configurable: true
+  });
+  
+  // Intercept analytics requests
   const originalSendBeacon = navigator.sendBeacon;
   const originalFetch = window.fetch;
-
+  const originalXHROpen = XMLHttpRequest.prototype.open;
+  const originalXHRSend = XMLHttpRequest.prototype.send;
+  
   navigator.sendBeacon = function(url, data) {
-    if (url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Beacon intercepted:', url);
-      // Modify the data if needed
-      return originalSendBeacon.call(this, url, data);
+    if (typeof url === 'string' && isAnalyticsRequest(url)) {
+      console.log('[Spoof] Beacon intercepted:', url);
+      const modifiedData = modifyAnalyticsData(data, '${proxyIp}');
+      return originalSendBeacon.call(this, url, modifiedData);
     }
     return originalSendBeacon.apply(this, arguments);
   };
-
+  
   window.fetch = function() {
     const url = arguments[0];
-    if (url && typeof url === 'string' && url.includes('google-analytics.com')) {
-      console.log('[GA Spoof] Fetch intercepted:', url);
+    if (typeof url === 'string' && isAnalyticsRequest(url)) {
+      console.log('[Spoof] Fetch intercepted:', url);
       
-      // Add headers to request
-      if (arguments[1]) {
+      if (arguments[1] && arguments[1].headers) {
+        arguments[1].headers['X-Forwarded-For'] = '${proxyIp}';
+      } else if (arguments[1]) {
         arguments[1].headers = {
-          ...arguments[1].headers,
-          'X-Forwarded-For': '${session.proxyIp || clientIp}',
-          'X-Geo-Country': '${session.country}'
+          'X-Forwarded-For': '${proxyIp}'
         };
+      }
+      
+      // Modify POST data if present
+      if (arguments[1] && arguments[1].body) {
+        arguments[1].body = modifyAnalyticsData(arguments[1].body, '${proxyIp}');
       }
     }
     return originalFetch.apply(this, arguments);
   };
+  
+  XMLHttpRequest.prototype.open = function() {
+    this._url = arguments[1];
+    return originalXHROpen.apply(this, arguments);
+  };
+  
+  XMLHttpRequest.prototype.send = function(data) {
+    if (this._url && isAnalyticsRequest(this._url)) {
+      console.log('[Spoof] XHR intercepted:', this._url);
+      const modifiedData = modifyAnalyticsData(data, '${proxyIp}');
+      return originalXHRSend.call(this, modifiedData);
+    }
+    return originalXHRSend.apply(this, arguments);
+  };
+  
+  function isAnalyticsRequest(url) {
+    const analyticsDomains = [
+      'google-analytics.com',
+      'www.google-analytics.com',
+      'stats.g.doubleclick.net',
+      'analytics.google.com',
+      'ga.jsp',
+      'facebook.com/tr',
+      'connect.facebook.net',
+      'analytics.tiktok.com',
+      'ping.edge.tiktok.com'
+    ];
+    
+    return analyticsDomains.some(domain => url.includes(domain));
+  }
+  
+  function modifyAnalyticsData(data, ip) {
+    if (typeof data === 'string') {
+      try {
+        // For GA requests
+        if (data.includes('&uip=')) {
+          data = data.replace(/&uip=[^&]*/, '&uip=' + encodeURIComponent(ip));
+        } else {
+          data += '&uip=' + encodeURIComponent(ip);
+        }
+        
+        if (data.includes('&ua=')) {
+          data = data.replace(/&ua=[^&]*/, '&ua=' + encodeURIComponent('${session.userAgent.replace(/'/g, "\\'")}'));
+        }
+      } catch (e) {
+        console.error('Error modifying analytics data:', e);
+      }
+    }
+    return data;
+  }
+  
+  console.log('Fingerprint spoofing activated for IP: ${proxyIp}');
 })();
 </script>`;
 }
 
-// ----------------- Enhanced Fetch with Retry Logic -----------------
-async function fetchWithRetry(url, options, maxRetries = 3) {
-  let lastError;
+// ----------------- Main Request Handler -----------------
+app.use(async (req, res) => {
+  const clientIp = req.headers['x-forwarded-for'] || 
+                   req.connection.remoteAddress || 
+                   req.socket.remoteAddress ||
+                   (req.connection.socket ? req.connection.socket.remoteAddress : null);
   
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const fetch = (await import("node-fetch")).default;
-      const response = await fetch(url, options);
-      
-      // Check for Cloudflare or other blocking pages
-      const body = await response.text();
-      if (body.includes('challenge-form') || 
-          body.includes('Cloudflare') || 
-          body.includes('Please enable cookies') ||
-          body.includes('Sorry, you have been blocked')) {
-        throw new Error('Site is blocking requests with anti-bot protection');
-      }
-      
-      return { response, body };
-    } catch (err) {
-      lastError = err;
-      logWarn(`Attempt ${i + 1} failed: ${err.message}`);
-      
-      // Wait before retrying (exponential backoff)
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
-  
-  throw lastError;
-}
-
-// ----------------- Routes -----------------
-app.get("/", async (req, res) => {
-  const clientIp = getClientIp(req);
   const session = createSession();
-  logInfo(`Request from ${clientIp}`);
-
+  const proxy = getNextProxy();
+  let agent = null;
+  let proxyIp = "direct";
+  
+  logInfo(`Request from ${clientIp} for ${req.url}`);
+  
   try {
-    const proxy = await getWorkingProxy();
-    let agent = null;
-    let proxyIp = "direct";
-
+    // Use proxy if available
     if (proxy) {
       session.proxyIp = proxy.ip;
       proxyIp = proxy.ip;
       agent = new SocksProxyAgent(proxy.url);
+      logInfo(`✅ Using proxy: ${proxy.url} (IP: ${proxy.ip})`);
+    } else {
+      logWarn("⚠️ No proxy available, using direct connection");
     }
-
-    const fetchOptions = {
-      timeout: 15000,
-      headers: getSpoofedHeaders(proxyIp, session.userAgent, session.country, session.timezone),
-      ...(agent && { agent }),
-      redirect: 'manual', // Handle redirects manually to avoid issues
-    };
-
-    const { response, body } = await fetchWithRetry(TARGET_SITE, fetchOptions);
-
-    let modifiedBody = body;
-    if (response.headers.get("content-type")?.includes("text/html")) {
-      const sessionScript = `
-      <script>
-        console.log("Proxy: ${proxyIp}");
-        console.log("User-Agent: ${session.userAgent}");
-        console.log("Country: ${session.country}");
-        console.log("Timezone: ${session.timezone}");
-      </script>`;
-      
-      // Inject scripts before closing body tag
-      if (modifiedBody.includes("</body>")) {
-        modifiedBody = modifiedBody.replace("</body>", sessionScript + getGASpoofScript(session, clientIp) + "</body>");
-      } else {
-        modifiedBody += sessionScript + getGASpoofScript(session, clientIp);
-      }
-    }
-
-    // Copy relevant headers from the original response
-    const contentType = response.headers.get("content-type") || "text/html";
-    res.set("Content-Type", contentType);
     
-    // Copy other headers if needed
-    if (response.headers.get("cache-control")) {
-      res.set("Cache-Control", response.headers.get("cache-control"));
+    // Prepare request options
+    const fetchOptions = {
+      method: req.method,
+      headers: getSpoofedHeaders(session, proxyIp),
+      redirect: 'follow',
+      timeout: 10000,
+      compress: true,
+      ...(agent && { agent })
+    };
+    
+    // Copy relevant headers from original request
+    if (req.headers['accept']) fetchOptions.headers['Accept'] = req.headers['accept'];
+    if (req.headers['accept-language']) fetchOptions.headers['Accept-Language'] = req.headers['accept-language'];
+    
+    // Make the request
+    const fetch = (await import("node-fetch")).default;
+    const targetUrl = `${TARGET_SITE}${req.originalUrl}`;
+    const response = await fetch(targetUrl, fetchOptions);
+    
+    // Get content type to determine if we should inject scripts
+    const contentType = response.headers.get('content-type') || '';
+    
+    // For HTML responses, we'll inject our spoofing script
+    if (contentType.includes('text/html')) {
+      let body = await response.text();
+      
+      // Inject our fingerprint spoofing script before the closing body tag
+      if (body.includes('</body>')) {
+        body = body.replace('</body>', getFingerprintSpoofScript(session, proxyIp) + '</body>');
+      } else {
+        body += getFingerprintSpoofScript(session, proxyIp);
+      }
+      
+      // Set appropriate headers
+      res.set({
+        'Content-Type': 'text/html',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      
+      logInfo(`🚀 Injected spoof script into HTML response`);
+      res.status(response.status).send(body);
+    } else {
+      // For non-HTML content, just pipe it through
+      res.set('Content-Type', contentType);
+      
+      // Copy other headers if needed
+      if (response.headers.get('content-length')) {
+        res.set('Content-Length', response.headers.get('content-length'));
+      }
+      
+      if (response.headers.get('cache-control')) {
+        res.set('Cache-Control', response.headers.get('cache-control'));
+      }
+      
+      response.body.pipe(res);
     }
-
-    res.status(response.status).send(modifiedBody);
-    logInfo(`Served ${TARGET_SITE} to ${clientIp} via ${proxyIp}`);
-
+    
   } catch (err) {
-    logError(`Fetch error: ${err.message}`);
+    logError(`Request failed: ${err.message}`);
+    
+    // If proxy failed, remove it from working pool
+    if (proxy) {
+      workingProxies = workingProxies.filter(p => p.url !== proxy.url);
+      logWarn(`⚠️ Proxy failed, removing from pool: ${proxy.url}`);
+    }
+    
     res.status(500).send(`
-      <h2>Error accessing website</h2>
+      <h2>Proxy Error</h2>
       <p>${err.message}</p>
-      <p>This might be due to:</p>
-      <ul>
-        <li>Website anti-bot protection (like Cloudflare)</li>
-        <li>Proxy server issues</li>
-        <li>Network connectivity problems</li>
-      </ul>
+      <p>Please try again. The system will automatically try a different proxy.</p>
     `);
   }
 });
 
-app.get("/health", (req, res) => {
+// ----------------- Health Endpoint -----------------
+app.get('/health', (req, res) => {
   res.json({
-    status: "OK",
-    proxies: proxies.length,
-    workingProxies: proxies.filter(p => p.working).length,
-    target: TARGET_SITE,
-    timestamp: new Date().toISOString(),
+    status: 'ok',
+    proxies: {
+      total: proxies.length,
+      working: workingProxies.length
+    },
+    target: TARGET_SITE
   });
 });
 
-// ----------------- Start Server -----------------
-function startServer(port, host, retries = 10) {
-  if (retries <= 0) {
-    logError("Failed to start server after multiple attempts");
-    process.exit(1);
-  }
-
-  const server = app.listen(port, host, () => {
-    logInfo(`Server running: http://${host}:${port}`);
-    logInfo(`Proxying to: ${TARGET_SITE}`);
-  }).on("error", (err) => {
-    if (err.code === "EADDRINUSE") {
-      logWarn(`Port ${port} busy. Retrying on ${port + 1}...`);
-      startServer(port + 1, host, retries - 1);
-    } else {
-      logError(`Server failed: ${err.message}`);
-      process.exit(1);
-    }
+// ----------------- Initialization -----------------
+async function startServer() {
+  await initializeProxies();
+  
+  const server = app.listen(PORT, HOST, () => {
+    logInfo(`Server running on http://${HOST}:${PORT}`);
+    logInfo(`Proxying requests to: ${TARGET_SITE}`);
   });
-
+  
   return server;
 }
 
@@ -353,10 +457,8 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
-  logInfo('Shutting down server...');
-  process.exit(0);
-});
-
 // Start the server
-startServer(PORT, HOST);
+startServer().catch(err => {
+  logError(`Failed to start server: ${err.message}`);
+  process.exit(1);
+});
