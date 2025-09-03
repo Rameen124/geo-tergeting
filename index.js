@@ -27,7 +27,7 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
+const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
 
 // Add cookie parser middleware
 app.use(cookieParser());
