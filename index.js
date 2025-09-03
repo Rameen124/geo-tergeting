@@ -27,13 +27,12 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const TARGET_SITE = process.env.TARGET_SITE || "https://havali.xyz";
+const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
 
 // Add cookie parser middleware
 app.use(cookieParser());
 
 // ----------------- Session Storage -----------------
-// In production, use Redis or similar for session storage
 const sessionStore = new Map();
 
 // ----------------- Proxy Management -----------------
@@ -144,7 +143,8 @@ function createSession() {
     hardwareConcurrency: randomPick([4, 8, 12, 16]),
     deviceMemory: randomPick([4, 8, 16]),
     // Store proxy info for GA requests
-    proxyUrl: null
+    proxyUrl: null,
+    createdAt: Date.now()
   };
 }
 
@@ -178,6 +178,7 @@ function getSpoofedHeaders(session, proxyIp) {
 }
 
 // ----------------- GA Proxy Endpoint -----------------
+// This must be defined BEFORE the catch-all handler
 app.get("/ga-proxy", async (req, res) => {
   const sessionId = req.cookies.sessionId;
   
@@ -234,6 +235,19 @@ app.get("/ga-proxy", async (req, res) => {
   }
 });
 
+// ----------------- Health Endpoint -----------------
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    proxies: {
+      total: proxies.length,
+      working: workingProxies.length
+    },
+    target: TARGET_SITE,
+    sessions: sessionStore.size
+  });
+});
+
 // ----------------- Enhanced Fingerprint Spoofing -----------------
 function getFingerprintSpoofScript(session, proxyIp) {
   return `
@@ -248,9 +262,64 @@ Object.defineProperty(navigator, 'userAgent', {
   configurable: true
 });
 
-// [Previous fingerprint spoofing code remains the same...]
+Object.defineProperty(navigator, 'platform', {
+  get: function() { return '${session.platform}'; },
+  configurable: true
+});
 
-// GA proxy interceptor
+Object.defineProperty(navigator, 'hardwareConcurrency', {
+  get: function() { return ${session.hardwareConcurrency}; },
+  configurable: true
+});
+
+Object.defineProperty(navigator, 'deviceMemory', {
+  get: function() { return ${session.deviceMemory}; },
+  configurable: true
+});
+
+Object.defineProperty(navigator, 'languages', {
+  get: function() { return ['${session.language}']; },
+  configurable: true
+});
+
+// Timezone spoofing
+const originalDateTimeFormat = Intl.DateTimeFormat;
+Intl.DateTimeFormat = function(locales, options) {
+  if (options && options.timeZone) {
+    options.timeZone = '${session.timezone}';
+  } else {
+    options = {...options, timeZone: '${session.timezone}'};
+  }
+  return new originalDateTimeFormat(locales, options);
+};
+
+// Screen properties
+Object.defineProperty(screen, 'width', {
+  get: function() { return ${session.viewport.width}; },
+  configurable: true
+});
+
+Object.defineProperty(screen, 'height', {
+  get: function() { return ${session.viewport.height}; },
+  configurable: true
+});
+
+Object.defineProperty(screen, 'availWidth', {
+  get: function() { return ${session.viewport.width}; },
+  configurable: true
+});
+
+Object.defineProperty(screen, 'availHeight', {
+  get: function() { return ${session.viewport.height}; },
+  configurable: true
+});
+
+Object.defineProperty(window, 'devicePixelRatio', {
+  get: function() { return ${session.viewport.deviceScaleFactor}; },
+  configurable: true
+});
+
+// Intercept analytics requests
 (function() {
   const originalSendBeacon = navigator.sendBeacon;
   const originalFetch = window.fetch;
@@ -291,12 +360,15 @@ Object.defineProperty(navigator, 'userAgent', {
       console.log('[GA Proxy] Fetch intercepted:', url);
       
       // Modify to use our proxy
-      arguments[0] = '/ga-proxy?url=' + encodeURIComponent(url);
+      const newArgs = [...arguments];
+      newArgs[0] = '/ga-proxy?url=' + encodeURIComponent(url);
       
       // Add session cookie to maintain proxy consistency
-      if (!arguments[1]) arguments[1] = {};
-      if (!arguments[1].headers) arguments[1].headers = {};
-      arguments[1].headers['Cookie'] = 'sessionId=' + sessionId;
+      if (!newArgs[1]) newArgs[1] = {};
+      if (!newArgs[1].headers) newArgs[1].headers = {};
+      newArgs[1].headers['Cookie'] = 'sessionId=' + sessionId;
+      
+      return originalFetch.apply(this, newArgs);
     }
     return originalFetch.apply(this, arguments);
   };
@@ -314,8 +386,8 @@ Object.defineProperty(navigator, 'userAgent', {
       this._url = '/ga-proxy?url=' + encodeURIComponent(this._url);
       
       // Add session cookie
-      if (!this._headers) this._headers = {};
-      this._headers['Cookie'] = 'sessionId=' + sessionId;
+      if (!this.headers) this.headers = {};
+      this.setRequestHeader('Cookie', 'sessionId=' + sessionId);
     }
     return originalXHRSend.call(this, data);
   };
@@ -342,11 +414,12 @@ Object.defineProperty(navigator, 'userAgent', {
 }
 
 // ----------------- Main Request Handler -----------------
+// This must be defined AFTER all specific routes
 app.use(async (req, res) => {
   let sessionId = req.cookies.sessionId;
   let session;
   
-  // Check if we have a existing session
+  // Check if we have an existing session
   if (sessionId && sessionStore.has(sessionId)) {
     session = sessionStore.get(sessionId);
     logInfo(`Reusing existing session: ${sessionId}`);
@@ -452,6 +525,13 @@ app.use(async (req, res) => {
     if (proxy) {
       workingProxies = workingProxies.filter(p => p.url !== proxy.url);
       logWarn(`⚠️ Proxy failed, removing from pool: ${proxy.url}`);
+      
+      // Try to get another proxy for retry
+      const newProxy = getNextProxy();
+      if (newProxy) {
+        logInfo(`Retrying with new proxy: ${newProxy.url}`);
+        // You could implement a retry mechanism here
+      }
     }
     
     res.status(500).send(`
@@ -460,19 +540,6 @@ app.use(async (req, res) => {
       <p>Please try again. The system will automatically try a different proxy.</p>
     `);
   }
-});
-
-// ----------------- Health Endpoint -----------------
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    proxies: {
-      total: proxies.length,
-      working: workingProxies.length
-    },
-    target: TARGET_SITE,
-    sessions: sessionStore.size
-  });
 });
 
 // ----------------- Session Cleanup -----------------
