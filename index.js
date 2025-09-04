@@ -28,7 +28,7 @@ const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
-const DOMAIN = process.env.DOMAIN || "havali.xyz";
+const DOMAIN = process.env.DOMAIN || "zapbox.store";
 
 // Add cookie parser middleware
 app.use(cookieParser());
