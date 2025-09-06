@@ -27,8 +27,14 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-const TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
+let TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
 const DOMAIN = process.env.DOMAIN || "zapbox.store";
+
+// Ensure TARGET_SITE has a protocol
+if (!TARGET_SITE.startsWith('http://') && !TARGET_SITE.startsWith('https://')) {
+  TARGET_SITE = 'https://' + TARGET_SITE;
+  logWarn(`TARGET_SITE was missing protocol, defaulting to: ${TARGET_SITE}`);
+}
 
 // Add cookie parser middleware
 app.use(cookieParser());
@@ -596,6 +602,11 @@ async function startServer() {
 process.on('SIGINT', () => {
   logInfo('Shutting down server...');
   process.exit(0);
+});
+
+process.on('unhandledRejection', (err) => {
+  logError(`Unhandled promise rejection: ${err.message}`);
+  process.exit(1);
 });
 
 // Start the server
