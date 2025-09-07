@@ -27,7 +27,7 @@ function logError(msg) {
 const app = express();
 const PORT = parseInt(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
-let TARGET_SITE = process.env.TARGET_SITE || "https://example.com";
+let TARGET_SITE = process.env.TARGET_SITE || "https://zapbox.store";
 const DOMAIN = process.env.DOMAIN || "zapbox.store";
 
 // Ensure TARGET_SITE has a protocol
